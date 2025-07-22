@@ -6,7 +6,10 @@
 #include "tal_sw_timer.h"
 #include "tal_mutex.h"
 #include "tal_gpio.h"
-#include "ws2812_spi.h"
+#include "tdd_pixel_ws2812.h"
+
+// LED数量定义 (从原ws2812_spi.h移植)
+#define WS2812_LED_COUNT 12
 
 #define TIMER_ID_STATE  TUYA_TIMER_NUM_1 // 定时器控制器ID
 #define TIMER_ID_ACTION TUYA_TIMER_NUM_2 // 动作定时器ID
@@ -60,7 +63,7 @@ typedef enum {
  * 功能说明：
  * 1. 初始化状态机数据结构
  * 2. 创建互斥锁保护状态机
- * 3. 初始化WS2812驱动
+ * 3. 初始化TDD WS2812驱动
  * 4. 创建状态定时器和动作定时器
  * 5. 进入上电自检状态
  */
@@ -80,5 +83,15 @@ void led_controller_init(void);
  * 2. 其他状态下立即执行新状态，并清理前一个状态的资源
  */
 void set_led_state(LedState new_state, uint8_t value);
+
+/**
+ * @brief 去初始化LED控制器
+ * 
+ * 功能说明：
+ * 1. 关闭TDD WS2812驱动
+ * 2. 释放相关资源
+ * 3. 销毁互斥锁
+ */
+void led_controller_deinit(void);
 
 #endif /* __LED_CONTROLLER_H__ */
