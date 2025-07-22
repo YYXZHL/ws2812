@@ -3,8 +3,14 @@
 #include "tal_sw_timer.h"
 #include "tal_mutex.h"
 #include "tal_gpio.h"
-#include "ws2812_spi.h"
+#include "tdd_pixel_ws2812.h"
+#include "tdl_pixel_driver.h"
 #include <string.h>
+
+// TDD WS2812驱动函数声明
+OPERATE_RET tdd_2812_driver_open(OUT DRIVER_HANDLE_T *handle, IN unsigned short pixel_num);
+OPERATE_RET tdd_ws2812_driver_close(IN DRIVER_HANDLE_T *handle);
+OPERATE_RET tdd_ws2812_driver_send_data(IN DRIVER_HANDLE_T handle, IN unsigned short *data_buf, IN unsigned int buf_len);
 
 // 颜色分量结构（RGB格式）
 typedef struct {
@@ -70,10 +76,112 @@ typedef struct {
 
 static LedController led_ctrl;
 
+// TDD WS2812驱动相关变量
+static DRIVER_HANDLE_T tdd_pixel_handle = NULL;
+static unsigned short pixel_buffer[WS2812_LED_COUNT * 3]; // RGB数据缓冲区
+static BOOL_T tdd_driver_initialized = FALSE;
+
+// TDD驱动接口函数定义
+static PIXEL_DRIVER_INTFS_T tdd_ws2812_intfs = {
+    .open = tdd_2812_driver_open,
+    .close = tdd_ws2812_driver_close,
+    .output = tdd_ws2812_driver_send_data,
+    .config = NULL
+};
+
+// TDD驱动初始化函数
+static OPERATE_RET tdd_pixel_init(void) {
+    OPERATE_RET ret;
+    
+    if (tdd_driver_initialized) {
+        return OPRT_OK;
+    }
+    
+    // 注册WS2812驱动
+    PIXEL_DRIVER_CONFIG_T driver_config = {
+        .port = TUYA_SPI_NUM_0,
+        .line_seq = GRB_ORDER  // WS2812使用GRB顺序
+    };
+    
+    ret = tdd_ws2812_driver_register(&driver_config);
+    if (ret != OPRT_OK) {
+        TAL_PR_ERR("Failed to register TDD WS2812 driver: %d", ret);
+        return ret;
+    }
+    
+    // 打开设备
+    ret = tdd_ws2812_intfs.open(&tdd_pixel_handle, WS2812_LED_COUNT);
+    if (ret != OPRT_OK) {
+        TAL_PR_ERR("Failed to open TDD WS2812 device: %d", ret);
+        return ret;
+    }
+    
+    // 清空缓冲区
+    memset(pixel_buffer, 0, sizeof(pixel_buffer));
+    
+    tdd_driver_initialized = TRUE;
+    TAL_PR_DEBUG("TDD WS2812 driver initialized successfully");
+    
+    return OPRT_OK;
+}
+
+// 设置单个LED的颜色
+static OPERATE_RET tdd_pixel_set_pixel(uint16_t index, uint8_t red, uint8_t green, uint8_t blue) {
+    if (!tdd_driver_initialized || index >= WS2812_LED_COUNT) {
+        return OPRT_INVALID_PARM;
+    }
+    
+    // TDD驱动使用GRB顺序
+    pixel_buffer[index * 3 + 0] = green;  // G
+    pixel_buffer[index * 3 + 1] = red;    // R
+    pixel_buffer[index * 3 + 2] = blue;   // B
+    
+    return OPRT_OK;
+}
+
+// 设置所有LED为同一颜色
+static OPERATE_RET tdd_pixel_set_all(uint8_t red, uint8_t green, uint8_t blue) {
+    if (!tdd_driver_initialized) {
+        return OPRT_INVALID_PARM;
+    }
+    
+    for (int i = 0; i < WS2812_LED_COUNT; i++) {
+        tdd_pixel_set_pixel(i, red, green, blue);
+    }
+    
+    return OPRT_OK;
+}
+
+// 刷新LED显示
+static OPERATE_RET tdd_pixel_refresh(void) {
+    if (!tdd_driver_initialized || tdd_pixel_handle == NULL) {
+        return OPRT_RESOURCE_NOT_READY;
+    }
+    
+    return tdd_ws2812_intfs.output(tdd_pixel_handle, pixel_buffer, WS2812_LED_COUNT * 3);
+}
+
+// TDD驱动去初始化函数
+static OPERATE_RET tdd_pixel_deinit(void) {
+    if (!tdd_driver_initialized) {
+        return OPRT_OK;
+    }
+    
+    if (tdd_pixel_handle != NULL) {
+        tdd_ws2812_intfs.close(&tdd_pixel_handle);
+        tdd_pixel_handle = NULL;
+    }
+    
+    tdd_driver_initialized = FALSE;
+    TAL_PR_DEBUG("TDD WS2812 driver deinitialized");
+    
+    return OPRT_OK;
+}
+
 // 设置所有LED为同一颜色
 static void set_all_leds(const RGBColor *color) {
-    ws2812_spi_set_all(color->r, color->g, color->b);
-    ws2812_spi_refresh();
+    tdd_pixel_set_all(color->r, color->g, color->b);
+    tdd_pixel_refresh();
 }
 
 // 设置等级显示（用于信号强度和音量）
@@ -85,12 +193,12 @@ static void set_level_leds(const RGBColor *color, uint8_t level) {
     
     for (int i = 0; i < WS2812_LED_COUNT; i++) {
         if (i < level) {
-            ws2812_spi_set_pixel(i, color->r, color->g, color->b);
+            tdd_pixel_set_pixel(i, color->r, color->g, color->b);
         } else {
-            ws2812_spi_set_pixel(i, COLOR_BLACK.r, COLOR_BLACK.g, COLOR_BLACK.b);
+            tdd_pixel_set_pixel(i, COLOR_BLACK.r, COLOR_BLACK.g, COLOR_BLACK.b);
         }
     }
-    ws2812_spi_refresh();
+    tdd_pixel_refresh();
 }
 
 // 主定时器回调：处理所有状态事件
@@ -183,12 +291,12 @@ static void main_timer_cb(TIMER_ID timer_id, VOID_T *arg) {
             // 设置LED颜色
             if (led_ctrl.current_state == LED_CONFIGURING) {
                 // 配网中：绿灯呼吸
-                ws2812_spi_set_all(0, brightness, 0);
+                tdd_pixel_set_all(0, brightness, 0);
             } else {
                 // 呼吸灯：蓝灯呼吸
-                ws2812_spi_set_all(0, 0, brightness);
+                tdd_pixel_set_all(0, 0, brightness);
             }
-            ws2812_spi_refresh();
+            tdd_pixel_refresh();
             
             // 设置下一次呼吸定时
             tal_sw_timer_start(led_ctrl.main_timer, BREATH_TIMER_INTERVAL, TAL_TIMER_ONCE);
@@ -227,9 +335,12 @@ void led_controller_init(void) {
         }
     }
     
-    // 初始化WS2812驱动
-    ws2812_app_init();
-    TAL_PR_DEBUG("WS2812 driver initialized");
+    // 初始化TDD WS2812驱动
+    if (OPRT_OK != tdd_pixel_init()) {
+        TAL_PR_ERR("Failed to initialize TDD WS2812 driver");
+        return;
+    }
+    TAL_PR_DEBUG("TDD WS2812 driver initialized");
     
     // 创建主定时器
     tal_sw_timer_create(main_timer_cb, NULL, &led_ctrl.main_timer);
@@ -306,4 +417,31 @@ void set_led_state(LedState new_state, uint8_t value) {
     // 更新当前状态
     led_ctrl.current_state = new_state;
     tal_mutex_unlock(led_ctrl.mutex);
+}
+
+// 去初始化LED控制器
+void led_controller_deinit(void) {
+    TAL_PR_DEBUG("Deinitializing LED controller");
+    
+    // 停止所有定时器
+    if (led_ctrl.main_timer) {
+        tal_sw_timer_stop(led_ctrl.main_timer);
+        tal_sw_timer_delete(led_ctrl.main_timer);
+        led_ctrl.main_timer = NULL;
+    }
+    
+    // 关闭TDD驱动
+    tdd_pixel_deinit();
+    
+    // 销毁互斥锁
+    if (led_ctrl.mutex) {
+        tal_mutex_unlock(led_ctrl.mutex);  // 确保未锁定状态
+        tal_mutex_release(led_ctrl.mutex);
+        led_ctrl.mutex = NULL;
+    }
+    
+    // 清零控制结构体
+    memset(&led_ctrl, 0, sizeof(LedController));
+    
+    TAL_PR_DEBUG("LED controller deinitialized");
 }
