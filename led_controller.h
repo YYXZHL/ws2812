@@ -4,7 +4,6 @@
 
 #include "tuya_cloud_types.h"
 #include "tal_sw_timer.h"
-#include "tal_mutex.h"
 #include "tal_gpio.h"
 #include "tdd_pixel_ws2812.h"
 
@@ -22,7 +21,7 @@
  * 2. 呼吸灯使用预计算的亮度表实现非线性亮度变化，符合人眼感知
  * 3. 所有时间参数通过宏定义配置，便于调整
  * 4. 状态机支持状态缓存机制，确保自检过程中不丢失指令
- * 5. 使用互斥锁保护状态机数据，确保多线程安全
+ * 5. 简化的单线程设计，无需互斥锁保护
  */
 
 // ========================== 时间参数配置 ==========================
@@ -62,10 +61,9 @@ typedef enum {
  * 
  * 功能说明：
  * 1. 初始化状态机数据结构
- * 2. 创建互斥锁保护状态机
- * 3. 初始化TDD WS2812驱动
- * 4. 创建状态定时器和动作定时器
- * 5. 进入上电自检状态
+ * 2. 初始化TDD WS2812驱动
+ * 3. 创建状态定时器和动作定时器
+ * 4. 进入上电自检状态
  */
 void led_controller_init(void);
 
@@ -90,7 +88,6 @@ void set_led_state(LedState new_state, uint8_t value);
  * 功能说明：
  * 1. 关闭TDD WS2812驱动
  * 2. 释放相关资源
- * 3. 销毁互斥锁
  */
 void led_controller_deinit(void);
 

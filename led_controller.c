@@ -1,7 +1,6 @@
 #include "led_controller.h"
 #include "tal_log.h"
 #include "tal_sw_timer.h"
-#include "tal_mutex.h"
 #include "tal_gpio.h"
 #include "tdd_pixel_ws2812.h"
 #include "tdl_pixel_driver.h"
@@ -69,9 +68,6 @@ typedef struct {
     
     // 定时器
     TIMER_ID main_timer;   // 主定时器：处理所有状态转换和动作
-    
-    // 互斥锁
-    MUTEX_HANDLE mutex;     // 状态保护互斥锁
 } LedController;
 
 static LedController led_ctrl;
@@ -203,7 +199,6 @@ static void set_level_leds(const RGBColor *color, uint8_t level) {
 
 // 主定时器回调：处理所有状态事件
 static void main_timer_cb(TIMER_ID timer_id, VOID_T *arg) {
-    tal_mutex_lock(led_ctrl.mutex);
     
     switch (led_ctrl.current_state) {
         case LED_INIT:
@@ -234,10 +229,9 @@ static void main_timer_cb(TIMER_ID timer_id, VOID_T *arg) {
                     // 重置等待状态
                     led_ctrl.has_pending_state = FALSE;
                     
-                    // 解锁后执行新状态
-                    tal_mutex_unlock(led_ctrl.mutex);
+                    // 执行新状态
                     set_led_state(next_state, next_value);
-                    return; // 直接返回，避免重复解锁
+                    return;
                 } else {
                     set_all_leds(&COLOR_BLACK);
                 }
@@ -307,8 +301,6 @@ static void main_timer_cb(TIMER_ID timer_id, VOID_T *arg) {
             // 其他状态无需处理
             break;
     }
-    
-    tal_mutex_unlock(led_ctrl.mutex);
 }
 
 // 清理当前状态资源
@@ -326,14 +318,6 @@ void led_controller_init(void) {
     
     // 清零控制结构体
     memset(&led_ctrl, 0, sizeof(LedController));
-    
-    // 创建互斥锁
-    if (NULL == led_ctrl.mutex) {
-        if (OPRT_OK != tal_mutex_create_init(&led_ctrl.mutex)) {
-            TAL_PR_ERR("Failed to create mutex");
-            return;
-        }
-    }
     
     // 初始化TDD WS2812驱动
     if (OPRT_OK != tdd_pixel_init()) {
@@ -355,15 +339,12 @@ void led_controller_init(void) {
 void set_led_state(LedState new_state, uint8_t value) {
     TAL_PR_DEBUG("Setting LED state: %d, value: %d", new_state, value);
     
-    tal_mutex_lock(led_ctrl.mutex);
-    
     // 上电自检独占处理：自检过程中接收的新状态将被缓存
     if (led_ctrl.current_state == LED_INIT && new_state != LED_INIT) {
         led_ctrl.pending_state = new_state;
         led_ctrl.pending_value = value;
         led_ctrl.has_pending_state = TRUE;
         TAL_PR_DEBUG("Init in progress, pending state: %d", new_state);
-        tal_mutex_unlock(led_ctrl.mutex);
         return;
     }
     
@@ -416,7 +397,6 @@ void set_led_state(LedState new_state, uint8_t value) {
     
     // 更新当前状态
     led_ctrl.current_state = new_state;
-    tal_mutex_unlock(led_ctrl.mutex);
 }
 
 // 去初始化LED控制器
@@ -432,13 +412,6 @@ void led_controller_deinit(void) {
     
     // 关闭TDD驱动
     tdd_pixel_deinit();
-    
-    // 销毁互斥锁
-    if (led_ctrl.mutex) {
-        tal_mutex_unlock(led_ctrl.mutex);  // 确保未锁定状态
-        tal_mutex_release(led_ctrl.mutex);
-        led_ctrl.mutex = NULL;
-    }
     
     // 清零控制结构体
     memset(&led_ctrl, 0, sizeof(LedController));
