@@ -7,9 +7,9 @@
 #include <string.h>
 
 // TDD WS2812驱动函数声明
-OPERATE_RET tdd_2812_driver_open(OUT DRIVER_HANDLE_T *handle, IN unsigned short pixel_num);
-OPERATE_RET tdd_ws2812_driver_close(IN DRIVER_HANDLE_T *handle);
-OPERATE_RET tdd_ws2812_driver_send_data(IN DRIVER_HANDLE_T handle, IN unsigned short *data_buf, IN unsigned int buf_len);
+OPERATE_RET tdd_2812_driver_open(OUT void **handle, IN unsigned short pixel_num);
+OPERATE_RET tdd_ws2812_driver_close(IN void **handle);
+OPERATE_RET tdd_ws2812_driver_send_data(IN void *handle, IN unsigned short *data_buf, IN unsigned int buf_len);
 
 // 颜色分量结构（RGB格式）
 typedef struct {
@@ -89,7 +89,7 @@ typedef struct {
 static LedController led_ctrl;
 
 // TDD WS2812驱动相关变量
-static DRIVER_HANDLE_T tdd_pixel_handle = NULL;
+static void *tdd_pixel_handle = NULL;
 static unsigned short pixel_buffer[WS2812_LED_COUNT * 3]; // RGB数据缓冲区
 static BOOL_T tdd_driver_initialized = FALSE;
 
