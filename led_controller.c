@@ -93,13 +93,7 @@ static DRIVER_HANDLE_T tdd_pixel_handle = NULL;
 static unsigned short pixel_buffer[WS2812_LED_COUNT * 3]; // RGB数据缓冲区
 static BOOL_T tdd_driver_initialized = FALSE;
 
-// TDD驱动接口函数定义
-static PIXEL_DRIVER_INTFS_T tdd_ws2812_intfs = {
-    .open = tdd_2812_driver_open,
-    .close = tdd_ws2812_driver_close,
-    .output = tdd_ws2812_driver_send_data,
-    .config = NULL
-};
+// 直接调用TDD WS2812驱动函数（不再使用函数指针接口）
 
 // TDD驱动初始化函数
 static OPERATE_RET tdd_pixel_init(void) {
@@ -122,7 +116,7 @@ static OPERATE_RET tdd_pixel_init(void) {
     }
     
     // 打开设备
-    ret = tdd_ws2812_intfs.open(&tdd_pixel_handle, WS2812_LED_COUNT);
+    ret = tdd_2812_driver_open(&tdd_pixel_handle, WS2812_LED_COUNT);
     if (ret != OPRT_OK) {
         TAL_PR_ERR("Failed to open TDD WS2812 device: %d", ret);
         return ret;
@@ -170,7 +164,7 @@ static OPERATE_RET tdd_pixel_refresh(void) {
         return OPRT_RESOURCE_NOT_READY;
     }
     
-    return tdd_ws2812_intfs.output(tdd_pixel_handle, pixel_buffer, WS2812_LED_COUNT * 3);
+    return tdd_ws2812_driver_send_data(tdd_pixel_handle, pixel_buffer, WS2812_LED_COUNT * 3);
 }
 
 // TDD驱动去初始化函数
@@ -180,7 +174,7 @@ static OPERATE_RET tdd_pixel_deinit(void) {
     }
     
     if (tdd_pixel_handle != NULL) {
-        tdd_ws2812_intfs.close(&tdd_pixel_handle);
+        tdd_ws2812_driver_close(&tdd_pixel_handle);
         tdd_pixel_handle = NULL;
     }
     
