@@ -7,9 +7,9 @@
 #include <string.h>
 
 // TDD WS2812驱动函数声明
-OPERATE_RET tdd_2812_driver_open(OUT DRIVER_HANDLE_T *handle, IN unsigned short pixel_num);
-OPERATE_RET tdd_ws2812_driver_close(IN DRIVER_HANDLE_T *handle);
-OPERATE_RET tdd_ws2812_driver_send_data(IN DRIVER_HANDLE_T handle, IN unsigned short *data_buf, IN unsigned int buf_len);
+OPERATE_RET tdd_2812_driver_open(OUT void **handle, IN unsigned short pixel_num);
+OPERATE_RET tdd_ws2812_driver_close(IN void **handle);
+OPERATE_RET tdd_ws2812_driver_send_data(IN void *handle, IN unsigned short *data_buf, IN unsigned int buf_len);
 
 // 颜色分量结构（RGB格式）
 typedef struct {
@@ -24,6 +24,9 @@ static const RGBColor COLOR_RED     = {255, 0, 0};   // 红色
 static const RGBColor COLOR_GREEN   = {0, 255, 0};   // 绿色
 static const RGBColor COLOR_BLUE    = {0, 0, 255};   // 蓝色
 static const RGBColor COLOR_YELLOW  = {255, 255, 0}; // 黄色
+
+// 自定义点亮顺序（0-based）：9,8,7,6,5,4,3,2,1,12,11,10 => 8,7,6,5,4,3,2,1,0,11,10,9
+static const uint8_t LED_ORDER[WS2812_LED_COUNT] = {8, 7, 6, 5, 4, 3, 2, 1, 0, 11, 10, 9};
 
 // 呼吸灯亮度表（非线性变化，符合人眼感知）
 static const uint8_t BREATH_BRIGHTNESS_TABLE[BREATH_TABLE_SIZE] = {
@@ -63,7 +66,20 @@ typedef struct {
         struct {
             BOOL_T is_light_on;  // 当前LED亮灭状态
             uint16_t blink_count; // 已闪烁次数
-        } blink;
+        } blink;                 // 对话/简单闪烁使用
+        struct {
+            uint8_t target_level;   // 目标等级（0-12）
+            uint8_t current_count;  // 当前已点亮数量
+            BOOL_T hold_phase;      // 是否处于保持阶段
+        } cfgsucc;                // 配网成功序列
+        struct {
+            uint8_t index;          // 跑马灯当前位置
+        } standby;                // 待机跑马
+        struct {
+            uint8_t completed_toggles; // 已完成的明灭次数
+            BOOL_T in_solid_phase;     // 是否进入常亮阶段
+            BOOL_T is_light_on;        // 当前亮灭
+        } wake;                   // 唤醒
     } state_data;
     
     // 定时器
@@ -73,17 +89,11 @@ typedef struct {
 static LedController led_ctrl;
 
 // TDD WS2812驱动相关变量
-static DRIVER_HANDLE_T tdd_pixel_handle = NULL;
+static void *tdd_pixel_handle = NULL;
 static unsigned short pixel_buffer[WS2812_LED_COUNT * 3]; // RGB数据缓冲区
 static BOOL_T tdd_driver_initialized = FALSE;
 
-// TDD驱动接口函数定义
-static PIXEL_DRIVER_INTFS_T tdd_ws2812_intfs = {
-    .open = tdd_2812_driver_open,
-    .close = tdd_ws2812_driver_close,
-    .output = tdd_ws2812_driver_send_data,
-    .config = NULL
-};
+// 直接调用TDD WS2812驱动函数（不再使用函数指针接口）
 
 // TDD驱动初始化函数
 static OPERATE_RET tdd_pixel_init(void) {
@@ -106,7 +116,7 @@ static OPERATE_RET tdd_pixel_init(void) {
     }
     
     // 打开设备
-    ret = tdd_ws2812_intfs.open(&tdd_pixel_handle, WS2812_LED_COUNT);
+    ret = tdd_2812_driver_open(&tdd_pixel_handle, WS2812_LED_COUNT);
     if (ret != OPRT_OK) {
         TAL_PR_ERR("Failed to open TDD WS2812 device: %d", ret);
         return ret;
@@ -154,7 +164,7 @@ static OPERATE_RET tdd_pixel_refresh(void) {
         return OPRT_RESOURCE_NOT_READY;
     }
     
-    return tdd_ws2812_intfs.output(tdd_pixel_handle, pixel_buffer, WS2812_LED_COUNT * 3);
+    return tdd_ws2812_driver_send_data(tdd_pixel_handle, pixel_buffer, WS2812_LED_COUNT * 3);
 }
 
 // TDD驱动去初始化函数
@@ -164,7 +174,7 @@ static OPERATE_RET tdd_pixel_deinit(void) {
     }
     
     if (tdd_pixel_handle != NULL) {
-        tdd_ws2812_intfs.close(&tdd_pixel_handle);
+        tdd_ws2812_driver_close(&tdd_pixel_handle);
         tdd_pixel_handle = NULL;
     }
     
@@ -187,11 +197,13 @@ static void set_level_leds(const RGBColor *color, uint8_t level) {
         level = WS2812_LED_COUNT;
     }
     
+    // 先全部置黑，再按顺序点亮前level个
     for (int i = 0; i < WS2812_LED_COUNT; i++) {
+        uint8_t phys = LED_ORDER[i];
         if (i < level) {
-            tdd_pixel_set_pixel(i, color->r, color->g, color->b);
+            tdd_pixel_set_pixel(phys, color->r, color->g, color->b);
         } else {
-            tdd_pixel_set_pixel(i, COLOR_BLACK.r, COLOR_BLACK.g, COLOR_BLACK.b);
+            tdd_pixel_set_pixel(phys, COLOR_BLACK.r, COLOR_BLACK.g, COLOR_BLACK.b);
         }
     }
     tdd_pixel_refresh();
@@ -238,7 +250,31 @@ static void main_timer_cb(TIMER_ID timer_id, VOID_T *arg) {
             }
             break;
             
-        case LED_CONFIG_SUCCESS:
+        case LED_CONFIG_SUCCESS: {
+            if (!led_ctrl.state_data.cfgsucc.hold_phase) {
+                if (led_ctrl.state_data.cfgsucc.current_count < led_ctrl.state_data.cfgsucc.target_level) {
+                    led_ctrl.state_data.cfgsucc.current_count++;
+                    set_level_leds(&COLOR_GREEN, led_ctrl.state_data.cfgsucc.current_count);
+                    if (led_ctrl.state_data.cfgsucc.current_count >= led_ctrl.state_data.cfgsucc.target_level) {
+                        // 达到目标，进入保持阶段
+                        led_ctrl.state_data.cfgsucc.hold_phase = TRUE;
+                        tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_HOLD_TIME, TAL_TIMER_ONCE);
+                    } else {
+                        tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_STEP_INTERVAL, TAL_TIMER_ONCE);
+                    }
+                } else {
+                    // 目标为0，直接进入保持阶段
+                    led_ctrl.state_data.cfgsucc.hold_phase = TRUE;
+                    tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_HOLD_TIME, TAL_TIMER_ONCE);
+                }
+            } else {
+                // 保持结束 -> 熄灭并空闲
+                led_ctrl.current_state = LED_IDLE;
+                set_all_leds(&COLOR_BLACK);
+            }
+            break;
+        }
+        
         case LED_VOLUME:
             // 显示状态超时，进入空闲
             led_ctrl.current_state = LED_IDLE;
@@ -268,9 +304,21 @@ static void main_timer_cb(TIMER_ID timer_id, VOID_T *arg) {
             }
             break;
             
-        case LED_CONFIGURING: // 配网中（绿灯呼吸效果）
-        case LED_BREATHING:   // 呼吸灯效果（蓝灯呼吸）
-        {
+        case LED_CONFIGURING: {
+            // 配网中：绿灯250ms亮/250ms灭闪烁
+            if (led_ctrl.state_data.blink.is_light_on) {
+                set_all_leds(&COLOR_BLACK);
+                led_ctrl.state_data.blink.is_light_on = FALSE;
+                tal_sw_timer_start(led_ctrl.main_timer, CONFIGURING_BLINK_OFF_TIME, TAL_TIMER_ONCE);
+            } else {
+                set_all_leds(&COLOR_GREEN);
+                led_ctrl.state_data.blink.is_light_on = TRUE;
+                tal_sw_timer_start(led_ctrl.main_timer, CONFIGURING_BLINK_ON_TIME, TAL_TIMER_ONCE);
+            }
+            break;
+        }
+        
+        case LED_BREATHING: {
             // 更新呼吸灯索引
             led_ctrl.state_data.breath.index++;
             
@@ -282,21 +330,59 @@ static void main_timer_cb(TIMER_ID timer_id, VOID_T *arg) {
             // 获取当前亮度值
             uint8_t brightness = BREATH_BRIGHTNESS_TABLE[led_ctrl.state_data.breath.index];
             
-            // 设置LED颜色
-            if (led_ctrl.current_state == LED_CONFIGURING) {
-                // 配网中：绿灯呼吸
-                tdd_pixel_set_all(0, brightness, 0);
-            } else {
-                // 呼吸灯：蓝灯呼吸
-                tdd_pixel_set_all(0, 0, brightness);
-            }
+            // 呼吸灯：蓝灯呼吸
+            tdd_pixel_set_all(0, 0, brightness);
             tdd_pixel_refresh();
             
             // 设置下一次呼吸定时
             tal_sw_timer_start(led_ctrl.main_timer, BREATH_TIMER_INTERVAL, TAL_TIMER_ONCE);
             break;
         }
-            
+        
+        case LED_WAKE: {
+            if (!led_ctrl.state_data.wake.in_solid_phase) {
+                // 闪烁阶段
+                if (led_ctrl.state_data.wake.is_light_on) {
+                    set_all_leds(&COLOR_BLACK);
+                    led_ctrl.state_data.wake.is_light_on = FALSE;
+                } else {
+                    set_all_leds(&COLOR_BLUE);
+                    led_ctrl.state_data.wake.is_light_on = TRUE;
+                }
+                led_ctrl.state_data.wake.completed_toggles++;
+                
+                if (led_ctrl.state_data.wake.completed_toggles >= (WAKE_BLINK_TIMES * 2)) {
+                    // 进入常亮阶段
+                    set_all_leds(&COLOR_BLUE);
+                    led_ctrl.state_data.wake.in_solid_phase = TRUE;
+                    tal_sw_timer_start(led_ctrl.main_timer, WAKE_HOLD_TIME, TAL_TIMER_ONCE);
+                } else {
+                    tal_sw_timer_start(led_ctrl.main_timer, WAKE_BLINK_INTERVAL, TAL_TIMER_ONCE);
+                }
+            } else {
+                // 常亮结束 -> 熄灭并空闲
+                led_ctrl.current_state = LED_IDLE;
+                set_all_leds(&COLOR_BLACK);
+            }
+            break;
+        }
+        
+        case LED_STANDBY: {
+            // 单个绿灯按自定义顺序跑马
+            led_ctrl.state_data.standby.index++;
+            if (led_ctrl.state_data.standby.index >= WS2812_LED_COUNT) {
+                led_ctrl.state_data.standby.index = 0;
+            }
+            // 清空
+            tdd_pixel_set_all(0, 0, 0);
+            // 点亮当前位置
+            uint8_t phys = LED_ORDER[led_ctrl.state_data.standby.index];
+            tdd_pixel_set_pixel(phys, COLOR_GREEN.r, COLOR_GREEN.g, COLOR_GREEN.b);
+            tdd_pixel_refresh();
+            tal_sw_timer_start(led_ctrl.main_timer, STANDBY_STEP_INTERVAL, TAL_TIMER_ONCE);
+            break;
+        }
+        
         default:
             // 其他状态无需处理
             break;
@@ -363,15 +449,32 @@ void set_led_state(LedState new_state, uint8_t value) {
             set_all_leds(&COLOR_BLACK);
             break;
             
-        case LED_CONFIGURING: // 配网中（绿灯呼吸效果）
-            led_ctrl.state_data.breath.index = 0;
-            tal_sw_timer_start(led_ctrl.main_timer, BREATH_TIMER_INTERVAL, TAL_TIMER_ONCE);
+        case LED_CONFIGURING: // 配网中（绿灯闪烁：250ms亮/250ms灭）
+            // 从亮开始闪烁
+            set_all_leds(&COLOR_GREEN);
+            led_ctrl.state_data.blink.is_light_on = TRUE;
+            tal_sw_timer_start(led_ctrl.main_timer, CONFIGURING_BLINK_ON_TIME, TAL_TIMER_ONCE);
             break;
             
-        case LED_CONFIG_SUCCESS: // 配网成功（显示WIFI信号强度）
-            set_level_leds(&COLOR_GREEN, value);
-            tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_TIMEOUT, TAL_TIMER_ONCE);
+        case LED_CONFIG_SUCCESS: { // 配网成功（显示WIFI信号强度：步进展示）
+            uint8_t target = value;
+            if (target > WS2812_LED_COUNT) target = WS2812_LED_COUNT;
+            led_ctrl.state_data.cfgsucc.target_level = target;
+            led_ctrl.state_data.cfgsucc.current_count = 0;
+            led_ctrl.state_data.cfgsucc.hold_phase = FALSE;
+            if (target == 0) {
+                // 直接进入保持阶段（保持0灯）
+                set_level_leds(&COLOR_GREEN, 0);
+                led_ctrl.state_data.cfgsucc.hold_phase = TRUE;
+                tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_HOLD_TIME, TAL_TIMER_ONCE);
+            } else {
+                // 立即点亮第1个并开始步进
+                led_ctrl.state_data.cfgsucc.current_count = 1;
+                set_level_leds(&COLOR_GREEN, 1);
+                tal_sw_timer_start(led_ctrl.main_timer, CONFIG_SUCCESS_STEP_INTERVAL, TAL_TIMER_ONCE);
+            }
             break;
+        }
             
         case LED_NET_ERROR: // 网络异常（红灯常亮）
             set_all_leds(&COLOR_RED);
@@ -392,6 +495,24 @@ void set_led_state(LedState new_state, uint8_t value) {
         case LED_BREATHING: // 呼吸灯效果（蓝灯呼吸）
             led_ctrl.state_data.breath.index = 0;
             tal_sw_timer_start(led_ctrl.main_timer, BREATH_TIMER_INTERVAL, TAL_TIMER_ONCE);
+            break;
+            
+        case LED_WAKE: // 唤醒：蓝灯闪两下后常亮，12s后无对话关闭
+            // 先点亮蓝色，开始计时闪烁
+            set_all_leds(&COLOR_BLUE);
+            led_ctrl.state_data.wake.in_solid_phase = FALSE;
+            led_ctrl.state_data.wake.completed_toggles = 0;
+            led_ctrl.state_data.wake.is_light_on = TRUE;
+            tal_sw_timer_start(led_ctrl.main_timer, WAKE_BLINK_INTERVAL, TAL_TIMER_ONCE);
+            break;
+            
+        case LED_STANDBY: // 待机：单个绿灯跑马
+            // 先点亮顺序中的第一个
+            led_ctrl.state_data.standby.index = 0;
+            tdd_pixel_set_all(0, 0, 0);
+            tdd_pixel_set_pixel(LED_ORDER[0], COLOR_GREEN.r, COLOR_GREEN.g, COLOR_GREEN.b);
+            tdd_pixel_refresh();
+            tal_sw_timer_start(led_ctrl.main_timer, STANDBY_STEP_INTERVAL, TAL_TIMER_ONCE);
             break;
     }
     

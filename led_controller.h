@@ -44,16 +44,28 @@
 #define BREATH_TIMER_INTERVAL   10    // 呼吸灯定时器周期 (ms)
 #define BREATH_TABLE_SIZE       256   // 呼吸灯亮度表大小
 
+// 新增场景参数
+#define CONFIGURING_BLINK_ON_TIME   250  // 配网中：绿灯亮时间 (ms)
+#define CONFIGURING_BLINK_OFF_TIME  250  // 配网中：绿灯灭时间 (ms)
+#define CONFIG_SUCCESS_STEP_INTERVAL 200  // 配网成功：每200ms亮一个灯 (ms)
+#define CONFIG_SUCCESS_HOLD_TIME     2000 // 配网成功：达标后保持亮2s (ms)
+#define WAKE_BLINK_INTERVAL          200  // 唤醒：蓝灯闪烁周期 (ms)
+#define WAKE_BLINK_TIMES             2    // 唤醒：闪两下
+#define WAKE_HOLD_TIME               12000 // 唤醒：常亮等待对话超时 (ms)
+#define STANDBY_STEP_INTERVAL        250  // 待机：跑马步进周期 (ms)
+
 // ========================== 状态枚举定义 ==========================
 typedef enum {
-    LED_INIT,         ///< 上电自检状态（红->绿->蓝）
-    LED_IDLE,         ///< 空闲状态（所有LED熄灭）
-    LED_CONFIGURING,  ///< 配网中（绿灯呼吸效果）
-    LED_CONFIG_SUCCESS,///< 配网成功（显示WIFI信号强度）
-    LED_NET_ERROR,    ///< 网络异常（红灯常亮）
-    LED_DIALOG,       ///< 对话中（蓝灯闪烁）
-    LED_VOLUME,       ///< 调节音量（黄灯等级显示）
-    LED_BREATHING     ///< 呼吸灯效果（蓝灯呼吸）
+    LED_INIT,          ///< 上电自检状态（红->绿->蓝）
+    LED_IDLE,          ///< 空闲状态（所有LED熄灭）
+    LED_CONFIGURING,   ///< 配网中（绿灯闪烁：250ms亮/250ms灭）
+    LED_CONFIG_SUCCESS,///< 配网成功（显示WIFI信号强度：每200ms按顺序点亮，达标后保持2s后熄灭）
+    LED_NET_ERROR,     ///< 网络异常（红灯常亮）
+    LED_DIALOG,        ///< 对话中（蓝灯闪烁）
+    LED_VOLUME,        ///< 调节音量（黄灯等级显示）
+    LED_BREATHING,     ///< 呼吸灯效果（蓝灯呼吸）
+    LED_WAKE,          ///< 唤醒（蓝灯闪两下后常亮，12秒内无对话关闭）
+    LED_STANDBY        ///< 待机（单个绿灯按自定义顺序360度循环跑马）
 } LedState;
 
 /**
@@ -72,8 +84,8 @@ void led_controller_init(void);
  * 
  * @param new_state 新状态（LedState枚举值）
  * @param value 状态附加参数：
- *   - LED_CONFIG_SUCCESS: WIFI信号强度(0-8)
- *   - LED_VOLUME: 音量等级(0-8)
+ *   - LED_CONFIG_SUCCESS: WIFI信号强度(0-12)
+ *   - LED_VOLUME: 音量等级(0-12)
  *   - 其他状态: 忽略此参数
  * 
  * 状态转换说明：
